@@ -10,12 +10,16 @@ import (
 )
 
 var (
-	portsStr = flag.String("ports", "", "Comma-separated list of ports to forward (REQUIRED)")
-	proto    = flag.String("proto", "TCP", "Forwarded port protocol")
-	label    = flag.String("label", "fwd2me", "Label for the forwarding")
+	proto = flag.String("proto", "TCP", "Forwarded port protocol")
+	label = flag.String("label", "fwd2me", "Label for the forwarding")
 )
 
 func main() {
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage of %s [options] [port1 port2 ...]:\n", os.Args[0])
+		flag.PrintDefaults()
+	}
+
 	flag.Parse()
 
 	ctx, cancel := context.WithCancel(context.Background())

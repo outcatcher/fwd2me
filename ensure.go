@@ -2,10 +2,10 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/outcatcher/fwd2me/forwarder"
@@ -18,11 +18,11 @@ var (
 
 // keepForwarded makes sure ports are forwarded as long as possible without using a long lease.
 func keepForwarded(ctx context.Context) error {
-	if *portsStr == "" {
-		return fmt.Errorf("no ports given")
-	}
+	portSlice := flag.Args()
 
-	portSlice := strings.Split(*portsStr, ",")
+	if len(portSlice) == 0 {
+		return fmt.Errorf("empty port list")
+	}
 
 	ports := make([]uint16, 0, len(portSlice))
 
