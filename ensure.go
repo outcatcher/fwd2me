@@ -2,43 +2,83 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/outcatcher/fwd2me/forwarder"
 )
 
+const portSeparator = ":"
+
 var (
 	duration      = time.Hour
 	retryDuration = time.Second
+
+	errEmptyPortList = errors.New("empty port list")
 )
+
+func parsePort(portStr, defaultProto string) (*forwarder.ForwardedPort, error) {
+	parts := strings.Split(portStr, portSeparator)
+
+	result := &forwarder.ForwardedPort{
+		Protocol: defaultProto,
+	}
+
+	if len(parts) > 0 {
+		local, err := strconv.ParseUint(parts[0], 10, 16)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse port, local part %s is not uint16: %w", parts[0], err)
+		}
+
+		result.InternalPort = uint16(local)
+		result.ExternalPort = result.InternalPort
+	}
+
+	if len(parts) > 1 {
+		remote, err := strconv.ParseUint(parts[1], 10, 16)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse port, remote part %s is not uint16: %w", parts[1], err)
+		}
+
+		result.ExternalPort = uint16(remote)
+	}
+
+	if len(parts) > 2 {
+		result.Protocol = parts[2]
+	}
+
+	return result, nil
+}
 
 // keepForwarded makes sure ports are forwarded as long as possible without using a long lease.
 func keepForwarded(ctx context.Context) error {
 	portSlice := flag.Args()
 
-	if len(portSlice) == 0 {
-		return fmt.Errorf("empty port list")
-	}
-
-	ports := make([]uint16, 0, len(portSlice))
+	ports := make([]*forwarder.ForwardedPort, 0, len(portSlice))
 
 	for _, portStr := range portSlice {
-		port, err := strconv.ParseUint(portStr, 10, 16)
+		forwarded, err := parsePort(portStr, *proto)
 		if err != nil {
+			fmt.Fprintln(os.Stderr, "Failed to parse port string:", portStr)
+
 			continue
 		}
 
-		ports = append(ports, uint16(port))
+		ports = append(ports, forwarded)
+	}
+
+	if len(ports) == 0 {
+		return errEmptyPortList
 	}
 
 	opts := forwarder.ForwardOpts{
 		LeaseDuration: duration,
-		Protocol:      *proto,
-		RemoteHost:    "",
+		RemoteHost:    "", // default gateway
 		ProgramName:   *label,
 		Ports:         ports,
 	}
