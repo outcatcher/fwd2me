@@ -1,0 +1,25 @@
+version: "3"
+
+vars:
+  buildDir: "./build"
+  binaryName: "fwd2me"
+  binaryPath: "{{.buildDir}}/{{.binaryName}}"
+tasks:
+  build:
+    desc: Build binary
+    generates:
+      - "{{.binaryPath}}"
+    preconditions:
+      - mkdir -p {{.buildDir}}
+    cmds:
+      - go build -ldflags="-s -w" -o "{{.binaryPath}}"
+
+  install:
+    desc: Build and install to ~/.local/bin
+    deps:
+      - task: build
+    vars:
+      home:
+        sh: echo ~
+    cmds:
+      - cp "{{.binaryPath}}" "{{.home}}/.local/bin/{{.binaryName}}"
