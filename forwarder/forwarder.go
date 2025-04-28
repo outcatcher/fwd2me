@@ -15,7 +15,7 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-type RouterClient interface {
+type routerClient interface {
 	AddPortMappingCtx(
 		ctx context.Context,
 		NewRemoteHost string,
@@ -43,7 +43,7 @@ type RouterClient interface {
 	LocalAddr() net.IP
 }
 
-func pickRouterClient(ctx context.Context) (RouterClient, error) {
+func pickRouterClient(ctx context.Context) (routerClient, error) {
 	tasks, _ := errgroup.WithContext(ctx)
 	// Request each type of client in parallel, and return what is found.
 	var ip1Clients []*internetgateway2.WANIPConnection1
@@ -84,23 +84,27 @@ func pickRouterClient(ctx context.Context) (RouterClient, error) {
 	}
 }
 
+type ForwardedPort struct {
+	InternalPort uint16
+	ExternalPort uint16
+	Protocol     string
+}
+
 type ForwardOpts struct {
 	RemoteHost    string
 	ProgramName   string
-	Protocol      string
-	Ports         []uint16
+	Ports         []*ForwardedPort
 	LeaseDuration time.Duration
 }
 
 type forwardedPort struct {
-	remoteHost   string
+	remoteHost   string // ForwardOpts has no remote host
 	externalPort uint16
 	protocol     string
-	endOfLease   time.Time
 }
 
 type Forwarder struct {
-	client RouterClient
+	client routerClient
 
 	existingForwarding map[forwardedPort]struct{}
 }
@@ -129,24 +133,32 @@ func (f *Forwarder) ForwardPorts(ctx context.Context, opts ForwardOpts) error {
 
 	for _, port := range opts.Ports {
 		// Try to clean up first. That's not optimal, but simplifies workflow.
-		err := f.client.DeletePortMappingCtx(ctx, opts.RemoteHost, port, opts.Protocol)
+		err := f.client.DeletePortMappingCtx(ctx, opts.RemoteHost, port.ExternalPort, port.Protocol)
 		if err != nil {
 			_, _ = fmt.Fprintln(os.Stderr, "failed to delete before create", err.Error())
 
 			errs = errors.Join(errs, err)
 		}
 
+		storedPort := forwardedPort{
+			remoteHost:   opts.RemoteHost,
+			externalPort: port.ExternalPort,
+			protocol:     port.Protocol,
+		}
+
+		delete(f.existingForwarding, storedPort)
+
 		if err := f.client.AddPortMappingCtx(
 			ctx,
 			opts.RemoteHost,
 			// External port number to expose to Internet:
-			port,
+			port.ExternalPort,
 			// Forward TCP (this could be "UDP" if we wanted that instead).
-			opts.Protocol,
+			port.Protocol,
 			// Internal port number on the LAN to forward to.
 			// Some routers might not support this being different to the external
 			// port number.
-			port, // symmetrical
+			port.InternalPort,
 			// Internal address on the LAN we want to forward to.
 			f.client.LocalAddr().String(),
 			// Enabled:
@@ -158,21 +170,17 @@ func (f *Forwarder) ForwardPorts(ctx context.Context, opts ForwardOpts) error {
 			// resets, you might want to periodically request before this elapses.
 			uint32(opts.LeaseDuration.Seconds()),
 		); err != nil {
-			extErr := fmt.Errorf("error forwarding port %d: %w", port, err)
+			extErr := fmt.Errorf("error forwarding port %+v: %w", port, err)
 
 			_, _ = fmt.Fprintln(os.Stderr, extErr.Error())
 
 			errs = errors.Join(errs, extErr)
 		}
 
-		f.existingForwarding[forwardedPort{
-			remoteHost:   opts.RemoteHost,
-			externalPort: port,
-			protocol:     opts.Protocol,
-			endOfLease:   time.Now().UTC().Add(opts.LeaseDuration),
-		}] = struct{}{}
+		f.existingForwarding[storedPort] = struct{}{}
 
-		fmt.Printf("Port %d forwarded\n", port)
+		fmt.Printf("Port forwarding created: internal (%d), external (%d), proto (%s)\n",
+			port.InternalPort, port.ExternalPort, port.Protocol)
 	}
 
 	if errs != nil {
@@ -200,7 +208,7 @@ func (f *Forwarder) StopAllForwarding(ctx context.Context) error {
 
 		deleted = append(deleted, fwd)
 
-		fmt.Printf("Port forwarding for port %d stopped\n", fwd.externalPort)
+		fmt.Printf("Port forwarding for external port %d stopped\n", fwd.externalPort)
 	}
 
 	for _, deletedPort := range deleted {
