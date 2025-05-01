@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"time"
@@ -27,6 +28,19 @@ type routerClient interface {
 		NewPortMappingDescription string,
 		NewLeaseDuration uint32,
 	) (err error)
+
+	GetGenericPortMappingEntryCtx(
+		ctx context.Context,
+		NewPortMappingIndex uint16,
+	) (NewRemoteHost string,
+		NewExternalPort uint16,
+		NewProtocol string,
+		NewInternalPort uint16,
+		NewInternalClient string,
+		NewEnabled bool,
+		NewPortMappingDescription string,
+		NewLeaseDuration uint32,
+		err error)
 
 	DeletePortMappingCtx(
 		ctx context.Context,
@@ -98,18 +112,37 @@ type ForwardOpts struct {
 }
 
 type forwardedPort struct {
-	remoteHost   string // ForwardOpts has no remote host
-	externalPort uint16
-	protocol     string
+	ForwardedPort
+
+	// ForwardedPort lacking fields
+	remoteHost    string
+	leaseDuration uint32
+	label         string
+	enabled       bool
 }
 
 type Forwarder struct {
 	client routerClient
+	logger *slog.Logger
 
 	existingForwarding map[forwardedPort]struct{}
 }
 
+type leveler struct{}
+
+func (l *leveler) Level() slog.Level {
+	if os.Getenv("DEBUG") != "" {
+		return slog.LevelDebug
+	}
+
+	return slog.LevelInfo
+}
+
 func (f *Forwarder) Init(ctx context.Context) error {
+	hdl := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: new(leveler)})
+
+	f.logger = slog.New(hdl)
+
 	client, err := pickRouterClient(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to init forwarder: %w", err)
@@ -121,94 +154,26 @@ func (f *Forwarder) Init(ctx context.Context) error {
 	return nil
 }
 
-func (f *Forwarder) ForwardPorts(ctx context.Context, opts ForwardOpts) error {
-	externalIP, err := f.client.GetExternalIPAddressCtx(ctx)
-	if err != nil {
-		return err
-	}
-
-	fmt.Println("Recreating forwarding from", externalIP, "to", f.client.LocalAddr().String())
-
-	var errs error
-
-	for _, port := range opts.Ports {
-		// Try to clean up first. That's not optimal, but simplifies workflow.
-		err := f.client.DeletePortMappingCtx(ctx, opts.RemoteHost, port.ExternalPort, port.Protocol)
-		if err != nil {
-			_, _ = fmt.Fprintln(os.Stderr, "failed to delete before create", err.Error())
-
-			errs = errors.Join(errs, err)
-		}
-
-		storedPort := forwardedPort{
-			remoteHost:   opts.RemoteHost,
-			externalPort: port.ExternalPort,
-			protocol:     port.Protocol,
-		}
-
-		delete(f.existingForwarding, storedPort)
-
-		if err := f.client.AddPortMappingCtx(
-			ctx,
-			opts.RemoteHost,
-			// External port number to expose to Internet:
-			port.ExternalPort,
-			// Forward TCP (this could be "UDP" if we wanted that instead).
-			port.Protocol,
-			// Internal port number on the LAN to forward to.
-			// Some routers might not support this being different to the external
-			// port number.
-			port.InternalPort,
-			// Internal address on the LAN we want to forward to.
-			f.client.LocalAddr().String(),
-			// Enabled:
-			true,
-			// Informational description for the client requesting the port forwarding.
-			opts.ProgramName,
-			// How long should the port forward last for in seconds.
-			// If you want to keep it open for longer and potentially across router
-			// resets, you might want to periodically request before this elapses.
-			uint32(opts.LeaseDuration.Seconds()),
-		); err != nil {
-			extErr := fmt.Errorf("error forwarding port %+v: %w", port, err)
-
-			_, _ = fmt.Fprintln(os.Stderr, extErr.Error())
-
-			errs = errors.Join(errs, extErr)
-		}
-
-		f.existingForwarding[storedPort] = struct{}{}
-
-		fmt.Printf("Port forwarding created: internal (%d), external (%d), proto (%s)\n",
-			port.InternalPort, port.ExternalPort, port.Protocol)
-	}
-
-	if errs != nil {
-		return fmt.Errorf("error forwarding ports: %w", errs)
-	}
-
-	return nil
-}
-
+// StopAllForwarding shuts down all existing forwardings.
 func (f *Forwarder) StopAllForwarding(ctx context.Context) error {
-	fmt.Println("Shutting down existing forwarding")
+	f.logger.InfoContext(ctx, "Shutting down existing forwarding")
 
 	deleted := make([]forwardedPort, 0, len(f.existingForwarding))
 
 	var errs error
 
 	for fwd := range f.existingForwarding {
-		err := f.client.DeletePortMappingCtx(ctx, fwd.remoteHost, fwd.externalPort, fwd.protocol)
+		err := f.client.DeletePortMappingCtx(ctx, fwd.remoteHost, fwd.ExternalPort, fwd.Protocol)
 
 		if err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "failed to delete port fowarding for port %d\n", fwd.externalPort)
+			f.logger.ErrorContext(ctx, "Failed to delete port fowarding", "externalPort", fwd.ExternalPort)
 
 			errs = errors.Join(errs, err)
 		}
 
 		deleted = append(deleted, fwd)
 
-		fmt.Printf("Port forwarding for external port %d stopped\n", fwd.externalPort)
+		f.logger.InfoContext(ctx, "Port forwarding stopped", "externalPort", fwd.ExternalPort)
 	}
 
 	for _, deletedPort := range deleted {

@@ -16,8 +16,10 @@ import (
 const portSeparator = ":"
 
 var (
-	duration      = time.Hour
+	leaseDuration = time.Hour
 	retryDuration = time.Second
+
+	checkDuration = 10 * time.Second
 
 	errEmptyPortList = errors.New("empty port list")
 )
@@ -77,13 +79,14 @@ func keepForwarded(ctx context.Context) error {
 	}
 
 	opts := forwarder.ForwardOpts{
-		LeaseDuration: duration,
-		RemoteHost:    "", // default gateway
+		LeaseDuration: leaseDuration,
+		RemoteHost:    "",
 		ProgramName:   *label,
 		Ports:         ports,
 	}
 
-	ticker := time.NewTimer(duration)
+	forwardTimer := time.NewTimer(leaseDuration)
+	checkTicker := time.NewTicker(checkDuration)
 
 	forwarder := new(forwarder.Forwarder)
 
@@ -99,16 +102,24 @@ func keepForwarded(ctx context.Context) error {
 
 	for {
 		select {
-		case <-ticker.C:
+		case <-forwardTimer.C:
 			if err := forwarder.ForwardPorts(ctx, opts); err != nil {
 				_, _ = fmt.Fprintln(os.Stderr, err.Error(), "retry in", retryDuration)
 
-				ticker.Reset(retryDuration)
+				forwardTimer.Reset(retryDuration)
 
 				continue
 			}
 
-			ticker.Reset(duration)
+			forwardTimer.Reset(leaseDuration)
+		case <-checkTicker.C:
+			// make sure forwardings are not dropped due to inactivity
+			err := forwarder.EnsureForwarded(ctx)
+
+			if err != nil {
+
+				_, _ = fmt.Fprintln(os.Stderr, err.Error())
+			}
 		case <-ctx.Done():
 			if err := forwarder.StopAllForwarding(shutdownCtx); err != nil {
 				return fmt.Errorf("error stopping forwarding: %w", err)
